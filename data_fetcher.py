@@ -2,26 +2,28 @@ import yfinance as yf
 import pandas as pd
 
 def fetch_market_data():
-    print("Fetching 1 year of daily data for AAPL (US) and ETE.AT (Greece)...")
+    print("Fetching data for ETE, Allwyn (ALWN), ELPE, and TTWO...")
     
-    # Define our target stocks. 
-    # .AT is the suffix Yahoo uses for the Athens Stock Exchange.
-    tickers = ["AAPL", "ETE.AT"] 
+    # Updated OPAP to its new official ticker: ALWN.AT
+    tickers = ["ETE.AT", "ALWN.AT", "ELPE.AT", "TTWO", "USDEUR=X"] 
     
-    # Download the data
-    data = yf.download(tickers, period="1y", interval="1d", threads=False)    
-    # We only care about the daily 'Close' prices
+    data = yf.download(tickers, period="1y", interval="1d", threads=False)
     closing_prices = data['Close']
     
-    # Remove days with missing data (like US holidays vs Greek holidays)
-    clean_data = closing_prices.dropna()
+    # Forward fill holiday gaps safely, then drop initial NaN rows
+    clean_data = closing_prices.ffill().dropna().copy()
     
-    print("\n--- First 5 Rows of Cleaned Data ---")
-    print(clean_data.head())
+    # Convert TTWO (USD) to Euros
+    clean_data['TTWO_EUR'] = clean_data['TTWO'] * clean_data['USDEUR=X']
     
-    # Save the output locally
-    clean_data.to_csv("historical_prices.csv")
-    print("\n[SUCCESS] Data saved to historical_prices.csv!")
+    # Keep only the final Euro columns
+    final_data = clean_data[['ETE.AT', 'ALWN.AT', 'ELPE.AT', 'TTWO_EUR']]
+    
+    print("\n--- Last 5 Rows (100% in Euros) ---")
+    print(final_data.tail())
+    
+    final_data.to_csv("historical_prices.csv")
+    print("\n[SUCCESS] New 4-asset portfolio saved!")
 
 if __name__ == "__main__":
     fetch_market_data()
