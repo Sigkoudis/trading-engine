@@ -71,18 +71,40 @@ class TechnicalScreener:
         c_atr = atr.iloc[-1]
         c_roc = roc.iloc[-1]
         
-        # 3. Master Logic Engine
+        # 3. Component Logic
         trend_bull = c_fast > c_slow
-        
-        if trend_bull and c_rsi < 30: signal = "STRONG BUY"
-        elif trend_bull and c_rsi > 70: signal = "HOLD/CAUTION"
-        elif trend_bull: signal = "BUY"
-        elif not trend_bull and c_rsi > 70: signal = "STRONG SELL"
-        elif not trend_bull and c_rsi < 30: signal = "WATCH"
-        else: signal = "SELL"
-            
         macd_status = "BULL" if c_macd > c_macd_sig else "BEAR"
         bb_status = "OVER" if c_price > bb_upper.iloc[-1] else "UNDER" if c_price < bb_lower.iloc[-1] else "INSIDE"
+        
+        # 4. The Composite Scoring System
+        score = 0
+        
+        if trend_bull: score += 1
+        else: score -= 1
+            
+        if macd_status == "BULL": score += 1
+        else: score -= 1
+            
+        if c_rsi < 30: score += 2
+        elif c_rsi > 70: score -= 2
+            
+        if not pd.isna(c_stoch):
+            if c_stoch < 0.20: score += 1
+            elif c_stoch > 0.80: score -= 1
+                
+        if bb_status == "UNDER": score += 1
+        elif bb_status == "OVER": score -= 1
+            
+        if not pd.isna(c_roc):
+            if c_roc > 0: score += 1
+            else: score -= 1
+                
+        # 5. Master Signal Generation (Max Score is +7, Min is -7)
+        if score >= 4: signal = "STRONG BUY"
+        elif score >= 1: signal = "BUY"
+        elif score > -2: signal = "NEUTRAL"
+        elif score > -4: signal = "SELL"
+        else: signal = "STRONG SELL"
             
         return {
             "Price": round(c_price, 2),
@@ -93,5 +115,6 @@ class TechnicalScreener:
             "Bollinger": bb_status,
             "ATR": f"{(c_atr / c_price) * 100:.2f}%",
             "ROC": f"{c_roc:+.1f}%",
+            "Score": f"{score:+d}",
             "Master Signal": signal
         }

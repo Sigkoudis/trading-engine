@@ -218,15 +218,15 @@ def main():
             if df is None:
                 continue
 
-            print("\n" + "=" * 110)
-            print(f"{'TICKER':<10} | {'PRICE':<8} | {'TREND':<6} | {'RSI':<4} | {'STOCH':<5} | {'MACD':<5} | {'BOLL':<7} | {'ATR %':<6} | {'1M ROC':<6} | {'MASTER SIGNAL'}")
-            print("=" * 110)
+            print("\n" + "=" * 115)
+            print(f"{'TICKER':<10} | {'PRICE':<8} | {'TREND':<6} | {'RSI':<4} | {'STOCH':<5} | {'MACD':<5} | {'BOLL':<7} | {'ATR %':<6} | {'1M ROC':<6} | {'SCORE':<5} | {'MASTER SIGNAL'}")
+            print("=" * 115)
             
             for ticker in df.columns:
                 result = TechnicalScreener.generate_signals(df[ticker])
                 
-                print(f"{ticker:<10} | {result['Price']:<8} | {result['Trend']:<6} | {result['RSI']:<4} | {result['STOCH']:<5} | {result['MACD']:<5} | {result['Bollinger']:<7} | {result['ATR']:<6} | {result['ROC']:<6} | {result['Master Signal']}")
-            print("=" * 110)
+                print(f"{ticker:<10} | {result['Price']:<8} | {result['Trend']:<6} | {result['RSI']:<4} | {result['STOCH']:<5} | {result['MACD']:<5} | {result['Bollinger']:<7} | {result['ATR']:<6} | {result['ROC']:<6} | {result['Score']:<5} | {result['Master Signal']}")
+            print("=" * 115)
 
         elif choice == '0':
             print("\nShutting down engine. Goodbye.")
