@@ -88,8 +88,15 @@ class MarketDataPipeline:
 
     def load_clean_data(self, target_days: int, force_refresh: bool = False) -> pd.DataFrame:
         """Entrypoint: handles local caching per timeframe and conversion."""
-        # Save separate cache files for 1m, 1h, and 1d data so they don't corrupt each other
-        cache_file = os.path.join(self.cache_dir, f"normalized_{self.base_currency}_{target_days}d.csv")
+        # Forcefully isolate cache files so Daily data never accidentally overrides Minute data
+        if target_days == 1:
+            interval = "minute"
+        elif target_days == 7:
+            interval = "hourly"
+        else:
+            interval = "daily"
+            
+        cache_file = os.path.join(self.cache_dir, f"normalized_{self.base_currency}_{interval}_{target_days}d.csv")
         
         if not force_refresh and os.path.exists(cache_file):
             print(f"[CACHE] Loading cached data from {cache_file}")
