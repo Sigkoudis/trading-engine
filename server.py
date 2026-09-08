@@ -8,8 +8,7 @@ app = FastAPI(title="Mikrometoxos Engine API")
 origins = [
     "http://localhost:5173",      # Your local React dev server
     "http://127.0.0.1:5173",      # Alternate local IP
-    # "https://your-future-domain.vercel.app" <-- Add your cloud domain here later
-]
+    "https://mikrometoxosassistand.vercel.app/"
 
 app.add_middleware(
     CORSMiddleware,
