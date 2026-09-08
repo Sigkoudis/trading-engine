@@ -8,7 +8,7 @@ app = FastAPI(title="Mikrometoxos Engine API")
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "https://mikrometoxosassistand-psicy9ek2-sigoud.vercel.app"
+    "https://trading-engine-livid.vercel.app" 
 ]
 app.add_middleware(
     CORSMiddleware,
