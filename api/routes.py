@@ -3,6 +3,7 @@ api/routes.py
 REST API endpoints for the quantitative trading engine.
 """
 
+import yfinance as yf
 from optimization.markowitz_slsqp import PortfolioOptimizer
 from backtesting.walk_forward import WalkForwardBacktester
 from analytics.risk_metrics import PortfolioAnalytics
@@ -28,6 +29,27 @@ def sanitize_downloaded_data(df: pd.DataFrame, min_days: int = 200, min_assets: 
         return None
     return cleaned
 
+def build_chart_payload(recent_data: pd.DataFrame, is_intraday: bool, stat_dict: dict) -> list:
+    """Helper function to cleanly serialize the chart dataframe into a React-friendly JSON list."""
+    chart_history = []
+    for idx, row in recent_data.iterrows():
+        # Intraday needs milliseconds for Recharts, Daily needs string dates
+        date_val = int(idx.timestamp() * 1000) if is_intraday else idx.strftime("%Y-%m-%d")
+        
+        chart_history.append({
+            "date": date_val, 
+            "price": round(row['price'], 2),
+            "ema_9": round(row['ema_9'], 2) if not pd.isna(row['ema_9']) else None,
+            "ema_20": round(row['ema_20'], 2) if not pd.isna(row['ema_20']) else None,
+            "sma_50": round(row['sma_50'], 2) if not pd.isna(row['sma_50']) else None,
+            "sma_100": round(row['sma_100'], 2) if not pd.isna(row['sma_100']) else None,
+            "sma_200": round(row['sma_200'], 2) if not pd.isna(row['sma_200']) else None,
+            "upper_band": round(row['upper_band'], 2) if not pd.isna(row['upper_band']) else None,
+            "lower_band": round(row['lower_band'], 2) if not pd.isna(row['lower_band']) else None,
+            **stat_dict  # Instantly unpacks all the ATH/ATL/Pivots into the dictionary!
+        })
+    return chart_history
+
 @router.get("/screen", response_model=ScreenerResponse)
 async def screen_stocks(
     tickers: str = Query(..., description="Comma-separated ticker symbols"),
@@ -40,11 +62,9 @@ async def screen_stocks(
 
     try:
         pipeline = MarketDataPipeline(tickers=clean_tickers, base_currency=base_currency, lookback_years=5)
-        
-        # Pass the 'days' variable to dynamically trigger 1m, 1h, or 1d fetching
         raw_df = pipeline.load_clean_data(target_days=days, force_refresh=True)
-        
         df = sanitize_downloaded_data(raw_df, min_days=50, min_assets=1)
+        
         if df is None or df.empty:
             raise HTTPException(status_code=404, detail="No sufficient historical data found.")
 
@@ -55,119 +75,60 @@ async def screen_stocks(
             # --- 1. CALCULATE TECHNICALS FOR THIS SPECIFIC TICKER ---
             ticker_df = pd.DataFrame({'price': s})
             
-            # Simple & Exponential Moving Averages
             ticker_df['sma_50'] = ticker_df['price'].rolling(window=50).mean()
             ticker_df['sma_100'] = ticker_df['price'].rolling(window=100).mean()
             ticker_df['sma_200'] = ticker_df['price'].rolling(window=200).mean()
             ticker_df['ema_9'] = ticker_df['price'].ewm(span=9, adjust=False).mean()
             ticker_df['ema_20'] = ticker_df['price'].ewm(span=20, adjust=False).mean()
             
-            # Bollinger Bands
             ticker_df['std_20'] = ticker_df['price'].rolling(window=20).std()
             ticker_df['sma_20'] = ticker_df['price'].rolling(window=20).mean()
             ticker_df['upper_band'] = ticker_df['sma_20'] + (ticker_df['std_20'] * 2)
             ticker_df['lower_band'] = ticker_df['sma_20'] - (ticker_df['std_20'] * 2)
 
             # --- 2. HISTORICAL HIGHS / LOWS & PIVOT POINTS ---
-            ath = float(s.max())
-            atl = float(s.min())
+            ath, atl = float(s.max()), float(s.min())
             h_6m = float(s.tail(126).max()) if len(s) >= 126 else ath
             l_6m = float(s.tail(126).min()) if len(s) >= 126 else atl
             h_2y = float(s.tail(504).max()) if len(s) >= 504 else ath
             l_2y = float(s.tail(504).min()) if len(s) >= 504 else atl
 
-            # Swing Pivot Calculation (Using 30-day swing window)
             swing_window = s.tail(30) if len(s) >= 30 else s
-            p_high = float(swing_window.max())
-            p_low = float(swing_window.min())
-            p_close = float(s.iloc[-1])
+            p_high, p_low, p_close = float(swing_window.max()), float(swing_window.min()), float(s.iloc[-1])
             pivot_p = (p_high + p_low + p_close) / 3.0
-            pivot_r1 = (2.0 * pivot_p) - p_low
-            pivot_s1 = (2.0 * pivot_p) - p_high
 
-            res = TechnicalScreener.generate_signals(s)
-            
-            if days == 1:
-                if ticker_df.index.tz is None:
-                    df_athens = ticker_df.copy()
-                    df_athens.index = df_athens.index.tz_localize('UTC').tz_convert('Europe/Athens')
-                else:
-                    df_athens = ticker_df.copy()
-                    df_athens.index = df_athens.index.tz_convert('Europe/Athens')
+            # Pack static values safely into a dictionary to pass to the helper function
+            stat_dict = {
+                "ath": round(ath, 2), "atl": round(atl, 2),
+                "h_6m": round(h_6m, 2), "l_6m": round(l_6m, 2),
+                "h_2y": round(h_2y, 2), "l_2y": round(l_2y, 2),
+                "pivot": round(pivot_p, 2), 
+                "r1": round((2.0 * pivot_p) - p_low, 2), 
+                "s1": round((2.0 * pivot_p) - p_high, 2)
+            }
 
-                last_day = df_athens.index[-1].date()
-                day_data = df_athens[df_athens.index.date == last_day]
+            # --- 3. TIMEZONE ALIGNMENT & SPLICING ---
+            is_intraday = days in [1, 7]
+            if is_intraday:
+                # Handle Timezones cleanly once
+                df_tz = ticker_df.tz_localize('UTC').tz_convert('Europe/Athens') if ticker_df.index.tz is None else ticker_df.tz_convert('Europe/Athens')
+                
+                if days == 1:
+                    last_day = df_tz.index[-1].date()
+                    day_data = df_tz[df_tz.index.date == last_day]
+                else: # days == 7
+                    cutoff = df_tz.index[-1] - pd.Timedelta(days=7)
+                    day_data = df_tz.loc[cutoff:]
+                
+                # Filter out dead hours
                 filtered_data = day_data.between_time("10:30", "23:00")
                 recent_data = filtered_data if not filtered_data.empty else day_data
-
-                chart_history = []
-                for idx, row in recent_data.iterrows():
-                    chart_history.append({
-                        "date": int(idx.timestamp() * 1000), 
-                        "price": round(row['price'], 2),
-                        "ema_9": round(row['ema_9'], 2) if not pd.isna(row['ema_9']) else None,
-                        "ema_20": round(row['ema_20'], 2) if not pd.isna(row['ema_20']) else None,
-                        "sma_50": round(row['sma_50'], 2) if not pd.isna(row['sma_50']) else None,
-                        "sma_100": round(row['sma_100'], 2) if not pd.isna(row['sma_100']) else None,
-                        "sma_200": round(row['sma_200'], 2) if not pd.isna(row['sma_200']) else None,
-                        "upper_band": round(row['upper_band'], 2) if not pd.isna(row['upper_band']) else None,
-                        "lower_band": round(row['lower_band'], 2) if not pd.isna(row['lower_band']) else None,
-                        "ath": round(ath, 2), "atl": round(atl, 2),
-                        "h_6m": round(h_6m, 2), "l_6m": round(l_6m, 2),
-                        "h_2y": round(h_2y, 2), "l_2y": round(l_2y, 2),
-                        "pivot": round(pivot_p, 2), "r1": round(pivot_r1, 2), "s1": round(pivot_s1, 2)
-                    })
-            
-            elif days == 7:
-                if ticker_df.index.tz is None:
-                    df_athens = ticker_df.copy()
-                    df_athens.index = df_athens.index.tz_localize('UTC').tz_convert('Europe/Athens')
-                else:
-                    df_athens = ticker_df.copy()
-                    df_athens.index = df_athens.index.tz_convert('Europe/Athens')
-
-                cutoff = df_athens.index[-1] - pd.Timedelta(days=7)
-                week_data = df_athens.loc[cutoff:]
-                filtered_data = week_data.between_time("10:30", "23:00")
-                recent_data = filtered_data if not filtered_data.empty else week_data
-
-                chart_history = []
-                for idx, row in recent_data.iterrows():
-                    chart_history.append({
-                        "date": int(idx.timestamp() * 1000), 
-                        "price": round(row['price'], 2),
-                        "ema_9": round(row['ema_9'], 2) if not pd.isna(row['ema_9']) else None,
-                        "ema_20": round(row['ema_20'], 2) if not pd.isna(row['ema_20']) else None,
-                        "sma_50": round(row['sma_50'], 2) if not pd.isna(row['sma_50']) else None,
-                        "sma_100": round(row['sma_100'], 2) if not pd.isna(row['sma_100']) else None,
-                        "sma_200": round(row['sma_200'], 2) if not pd.isna(row['sma_200']) else None,
-                        "upper_band": round(row['upper_band'], 2) if not pd.isna(row['upper_band']) else None,
-                        "lower_band": round(row['lower_band'], 2) if not pd.isna(row['lower_band']) else None,
-                        "ath": round(ath, 2), "atl": round(atl, 2),
-                        "h_6m": round(h_6m, 2), "l_6m": round(l_6m, 2),
-                        "h_2y": round(h_2y, 2), "l_2y": round(l_2y, 2),
-                        "pivot": round(pivot_p, 2), "r1": round(pivot_r1, 2), "s1": round(pivot_s1, 2)
-                    })
-            
             else:
                 recent_data = ticker_df.tail(days)
-                chart_history = []
-                for idx, row in recent_data.iterrows():
-                    chart_history.append({
-                        "date": idx.strftime("%Y-%m-%d"), 
-                        "price": round(row['price'], 2),
-                        "ema_9": round(row['ema_9'], 2) if not pd.isna(row['ema_9']) else None,
-                        "ema_20": round(row['ema_20'], 2) if not pd.isna(row['ema_20']) else None,
-                        "sma_50": round(row['sma_50'], 2) if not pd.isna(row['sma_50']) else None,
-                        "sma_100": round(row['sma_100'], 2) if not pd.isna(row['sma_100']) else None,
-                        "sma_200": round(row['sma_200'], 2) if not pd.isna(row['sma_200']) else None,
-                        "upper_band": round(row['upper_band'], 2) if not pd.isna(row['upper_band']) else None,
-                        "lower_band": round(row['lower_band'], 2) if not pd.isna(row['lower_band']) else None,
-                        "ath": round(ath, 2), "atl": round(atl, 2),
-                        "h_6m": round(h_6m, 2), "l_6m": round(l_6m, 2),
-                        "h_2y": round(h_2y, 2), "l_2y": round(l_2y, 2),
-                        "pivot": round(pivot_p, 2), "r1": round(pivot_r1, 2), "s1": round(pivot_s1, 2)
-                    })
+
+            # Build the payload using the single helper function
+            chart_history = build_chart_payload(recent_data, is_intraday, stat_dict)
+            res = TechnicalScreener.generate_signals(s)
 
             results.append(IndicatorResult(
                 ticker=ticker, price=res["Price"], trend=res["Trend"], rsi=res["RSI"],
@@ -180,8 +141,9 @@ async def screen_stocks(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-@router.get("/optimize")
 
+
+@router.get("/optimize")
 async def build_optimal_portfolio(
     tickers: str = Query(..., description="Comma-separated ticker symbols"),
     base_currency: str = Query("EUR"),
@@ -193,7 +155,6 @@ async def build_optimal_portfolio(
         raise HTTPException(status_code=400, detail="Portfolio optimization requires at least 2 assets.")
 
     try:
-        # Fetch 1 year of data for optimization training
         pipeline = MarketDataPipeline(tickers=clean_tickers, base_currency=base_currency, lookback_years=1)
         raw_df = pipeline.load_clean_data(target_days=252, force_refresh=True)
         df = sanitize_downloaded_data(raw_df, min_days=100, min_assets=len(clean_tickers))
@@ -201,37 +162,23 @@ async def build_optimal_portfolio(
         if df is None:
             raise HTTPException(status_code=404, detail="Insufficient data to optimize this portfolio.")
 
-        # Calculate standard daily returns
         daily_returns = df.pct_change().dropna()
-        
-        # ---------------------------------------------------------
-        # ALPHA OVERLAY: TECHNICAL ANALYSIS INTEGRATION
-        # We create an adjusted returns dataframe to trick the solver.
-        # ---------------------------------------------------------
         adjusted_returns = daily_returns.copy()
         
         for ticker in adjusted_returns.columns:
             try:
-                # Generate TA score for this specific asset
                 ta_results = TechnicalScreener.generate_signals(df[ticker])
                 score = int(ta_results["Score"])
-                
-                # Boost/Penalty: 2 basis points (0.02%) daily expected return per TA score point
                 adjusted_returns[ticker] += (score * 0.0002) 
-            except Exception as e:
-                pass # If TA fails for any reason, just use standard returns
-        # ---------------------------------------------------------
+            except Exception:
+                pass 
 
-        # Optimize using the ALPHA-ADJUSTED returns
         optimal_weights = PortfolioOptimizer.maximize_sharpe(
             adjusted_returns, max_weight=max_weight, min_weight=min_weight
         )
 
-        # Apply weights to the ACTUAL historical returns to get realistic tearsheet metrics
         weights_array = np.array([optimal_weights[col] for col in daily_returns.columns])
         simulated_port_returns = daily_returns.dot(weights_array)
-
-        # Generate the institutional tearsheet
         tearsheet = PortfolioAnalytics.full_tearsheet(simulated_port_returns)
 
         return {
@@ -251,14 +198,10 @@ async def run_backtest(
 ):
     clean_tickers = [t.strip().upper() for t in tickers.split(",") if t.strip()]
     try:
-        # Fetch 5 years of data (1 year to train, 1 year to test out-of-sample)
         pipeline = MarketDataPipeline(tickers=clean_tickers, base_currency=base_currency, lookback_years=5)
-        # Grab a 5-year buffer of data so we have plenty of history to filter from
         raw_df = pipeline.load_clean_data(target_days=1825, force_refresh=True)
         df = sanitize_downloaded_data(raw_df, min_days=50, min_assets=len(clean_tickers))
         
-        # --- NEW DATE SLICER ---
-        # Pandas DatetimeIndex naturally understands string dates!
         if end_date:
             df = df.loc[start_date:end_date]
         else:
@@ -269,15 +212,11 @@ async def run_backtest(
 
         daily_returns = df.pct_change().dropna()
 
-        # Run Walk-Forward engine
-        oos_returns, used_weights, start_date, end_date = WalkForwardBacktester.run_out_of_sample(
+        oos_returns, used_weights, test_start, test_end = WalkForwardBacktester.run_out_of_sample(
             daily_returns, train_window_days=252
         )
 
-        # Calculate compound growth of $10,000 invested out-of-sample
         cumulative_growth = (1 + oos_returns).cumprod() * 10000
-        
-        # Format the equity curve for React Recharts
         equity_curve = [
             {"date": idx.strftime("%Y-%m-%d"), "value": round(val, 2)} 
             for idx, val in cumulative_growth.items()
@@ -286,10 +225,57 @@ async def run_backtest(
         tearsheet = PortfolioAnalytics.full_tearsheet(oos_returns)
 
         return {
-            "test_period": f"{start_date} to {end_date}",
+            "test_period": f"{test_start} to {test_end}",
             "weights_used": used_weights,
             "tearsheet": tearsheet,
             "equity_curve": equity_curve
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/ticker-tape")
+async def get_ticker_tape():
+    tape_tickers = [
+        # Core Benchmarks
+        "^GSPC", "^IXIC", "^DJI", "GD.AT", 
+        # Global Pulse
+        "EURUSD=X", "GC=F", 
+        # Magnificent 7
+        "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA",
+        # Greek Top 10 Blue Chips
+        "ETE.AT", "OPAP.AT", "MYTIL.AT", "HTO.AT", "EUROB.AT", 
+        "ALPHA.AT", "PPC.AT", "BELA.AT", "MOH.AT", "TENERGY.AT",
+        # Crypto
+        "BTC-USD"
+    ]
+    try:
+        # Fetch 5 days of data to guarantee we capture a 1D change even over weekends
+        raw = yf.download(tape_tickers, period="5d", interval="1d", progress=False)['Close']
+        if isinstance(raw, pd.Series):
+            raw = raw.to_frame()
+            
+        tape_data = []
+        for ticker in tape_tickers:
+            if ticker in raw.columns:
+                s = raw[ticker].dropna()
+                if len(s) >= 2:
+                    latest = s.iloc[-1]
+                    prev = s.iloc[-2]
+                    pct_change = ((latest - prev) / prev) * 100
+                    
+                    # Clean up the ticker names for the UI
+                    display_name = ticker.replace("^", "").replace("=X", "").replace("=F", "")
+                    if display_name == "GSPC": display_name = "S&P 500"
+                    if display_name == "IXIC": display_name = "NASDAQ"
+                    if display_name == "DJI": display_name = "DOW"
+                    if display_name == "GD.AT": display_name = "ATHEX"
+                    if display_name == "BELA.AT": display_name = "JUMBO.AT"
+                    
+                    tape_data.append({
+                        "ticker": display_name,
+                        "price": round(float(latest), 2),
+                        "change": round(float(pct_change), 2)
+                    })
+        return {"data": tape_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
