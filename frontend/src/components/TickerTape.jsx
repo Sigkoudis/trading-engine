@@ -4,7 +4,7 @@ export default function TickerTape() {
   const [items, setItems] = useState([]);
 
   useEffect(() => {
-    fetch('http://127.0.0.1:8000/api/v1/ticker-tape')
+    fetch('https://trading-engine-zvhw.onrender.com/api/v1/ticker-tape')
       .then(res => res.json())
       .then(data => { if (data.data) setItems(data.data); })
       .catch(err => console.error("Failed to load ticker tape", err));
