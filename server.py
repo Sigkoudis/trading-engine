@@ -7,7 +7,8 @@ app = FastAPI(title="Mikrometoxos Engine API")
 # STRICT CORS CONFIGURATION
 origins = [
     "http://localhost:5173",
-    "https://mikrometoxosassistant.vercel.app"
+    "http://127.0.0.1:5173",
+    "https://mikrometoxosassistand-psicy9ek2-sigoud.vercel.app"
 ]
 app.add_middleware(
     CORSMiddleware,
